@@ -56,3 +56,10 @@ The BMS replies via notifications on `0xff01`. The reply is fragmented across mu
 * Auto-reset via DTR/RTS is unreliable on the user's dev board. 
 * The **BOOT button must be held manually** when `esptool.py` prints `Connecting...` to successfully flash.
 * `arduino-cli` was used for all compilation and flashing. Ensure the serial monitor is closed before flashing to prevent `Access Denied` COM port errors.
+## 6. Hardware Migration: ESP32-C3 SuperMini
+The project is being migrated from the dual-core ESP32-WROOM-32 to the single-core RISC-V **ESP32-C3 SuperMini**.
+* **Feasibility:** Fully supported. The C3's Bluetooth 5.0 LE radio handles the JBD BMS scanning perfectly, and NimBLE-Arduino + Adafruit_GFX are fully compatible.
+* **Pin Configuration:** The ESP32-C3 SuperMini breaks out 13 usable GPIOs (0-10, 20, 21). 
+* **V2 TFT Wiring on C3:** The ST7735 SPI display requires 5 pins. Default hardware SPI on C3 is SCK=4, MOSI=6. CS, DC, and RST can be mapped to any available GPIOs.
+* **Expansion Potential:** Wiring the display leaves ~8 free GPIOs on the SuperMini, which can be used for future features: physical buttons/encoders for UI navigation, buzzers for BMS alarms, Neopixel status LEDs, relay load control, or I2C environmental sensors (BME280).
+* **Compilation:** Requires changing the Arduino CLI board target from esp32:esp32:esp32 to esp32:esp32:esp32c3.
