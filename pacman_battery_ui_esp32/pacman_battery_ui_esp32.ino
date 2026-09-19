@@ -99,12 +99,27 @@ const int PELLET_SPACING = 10;
 bool mouthOpen = true;
 unsigned long lastAnimMs = 0;
 unsigned long lastDemoMs = 0;
-int demoDir = -1; // -1 discharging, +1 charging (demo only)
+int demoDir = 1; // -1 discharging, +1 charging (demo only)
+
+void drawStaticFrame();
+void drawTitleBar();
+void drawSocNumber();
+void drawPelletBar();
+void drawStateBadge();
+void drawVoltageCurrent();
+void drawPacmanIcon(int cx, int cy, int r, bool open);
+void drawGhostIcon(int cx, int cy, int r, uint16_t color);
+void drawBolt(int x, int y, uint16_t color);
 
 // ---------------------------------------------------------------------------
 // SETUP
 // ---------------------------------------------------------------------------
 void setup() {
+  Serial.begin(115200);
+  
+  pinMode(TFT_BLK, OUTPUT);
+  analogWrite(TFT_BLK, 128); // 50% brightness to reduce heat
+
   tft.initR(INITR_144GREENTAB);   // use INITR_144GREENTAB for most 1.44" boards
   tft.setRotation(0);
   tft.fillScreen(BG_BLACK);
@@ -187,11 +202,18 @@ void drawAll() {
 // Title bar: "BATTERY" label + a tiny chomping Pacman that runs in place
 // ---------------------------------------------------------------------------
 void drawTitleBar() {
-  tft.fillRect(0, 6, SCREEN_W, 14, BG_BLACK);
-  tft.setTextColor(PAC_YELLOW);
-  tft.setTextSize(1);
-  tft.setCursor(24, 9);
-  tft.print("PAC-BATTERY");
+  static bool first = true;
+  if (first) {
+    tft.fillRect(0, 6, SCREEN_W, 14, BG_BLACK);
+    tft.setTextColor(PAC_YELLOW);
+    tft.setTextSize(1);
+    tft.setCursor(24, 9);
+    tft.print("PAC-BATTERY");
+    first = false;
+  } else {
+    // Only clear the icon area to stop text flickering
+    tft.fillRect(0, 6, 20, 14, BG_BLACK);
+  }
 
   drawPacmanIcon(8, 13, 5, mouthOpen);
 }
@@ -200,51 +222,41 @@ void drawTitleBar() {
 // Big SOC percentage number, color-coded by level
 // ---------------------------------------------------------------------------
 void drawSocNumber() {
-  tft.fillRect(0, 24, SCREEN_W, 26, BG_BLACK);
-
   uint16_t color = PAC_YELLOW;
   if (batt.soc <= 15) color = GHOST_RED;
   else if (batt.soc <= 35) color = GHOST_ORANGE;
   else if (batt.isCharging) color = BOLT_GREEN;
 
-  tft.setTextColor(color);
+  tft.setTextColor(color, BG_BLACK);
   tft.setTextSize(3);
 
-  char buf[6];
-  sprintf(buf, "%d%%", batt.soc);
-  int textW = strlen(buf) * 18; // approx width at size 3
-  int x = (SCREEN_W - textW) / 2;
+  char buf[10];
+  sprintf(buf, "%d%%  ", batt.soc); // Pad spaces to overwrite old
+  int textW = 18 * 4; // Approx fixed max width for centering
+  int x = (SCREEN_W - textW) / 2 + 12;
   tft.setCursor(x, 28);
   tft.print(buf);
 }
 
 // ---------------------------------------------------------------------------
-// Pellet bar: Pacman "eats" pellets left to right as SOC rises.
-// Eaten pellets = gone (already consumed / used capacity).
-// Remaining pellets = still there (charge remaining).
-// Pacman sprite sits right at the boundary.
+// Pellet bar
 // ---------------------------------------------------------------------------
 void drawPelletBar() {
-  tft.fillRect(0, PELLET_ROW_Y - 6, SCREEN_W, 12, BG_BLACK);
+  tft.fillRect(0, PELLET_ROW_Y - 6, SCREEN_W, 14, BG_BLACK);
 
   int filledPellets = (batt.soc * PELLET_COUNT) / 100; // pellets remaining ahead
   int eatenPellets = PELLET_COUNT - filledPellets;
 
   for (int i = 0; i < PELLET_COUNT; i++) {
     int px = PELLET_START_X + i * PELLET_SPACING;
-    if (i < eatenPellets) {
-      // already eaten - nothing drawn (empty maze corridor)
-      continue;
-    }
+    if (i < eatenPellets) continue;
     tft.fillCircle(px, PELLET_ROW_Y, 2, PELLET_WHITE);
   }
 
-  // Pacman positioned right at the eaten/remaining boundary
   int pacX = PELLET_START_X + eatenPellets * PELLET_SPACING - 6;
   if (pacX < 6) pacX = 6;
   drawPacmanIcon(pacX, PELLET_ROW_Y, 6, mouthOpen);
 
-  // A little ghost trailing behind on the eaten side for flavor
   if (eatenPellets > 1) {
     uint16_t ghostColor = batt.isCharging ? GHOST_CYAN : GHOST_RED;
     drawGhostIcon(PELLET_START_X - 6, PELLET_ROW_Y, 5, ghostColor);
@@ -252,19 +264,19 @@ void drawPelletBar() {
 }
 
 // ---------------------------------------------------------------------------
-// State badge: CHARGING (bolt + green) or DISCHARGING (ghost + orange)
+// State badge
 // ---------------------------------------------------------------------------
 void drawStateBadge() {
-  tft.fillRect(0, 74, SCREEN_W, 12, BG_BLACK);
+  tft.fillRect(0, 74, 20, 12, BG_BLACK); // Clear icon area
 
   tft.setTextSize(1);
   if (batt.isCharging) {
-    tft.setTextColor(BOLT_GREEN);
+    tft.setTextColor(BOLT_GREEN, BG_BLACK);
     tft.setCursor(30, 76);
-    tft.print("CHARGING");
+    tft.print("CHARGING   ");
     drawBolt(18, 75, BOLT_GREEN);
   } else {
-    tft.setTextColor(GHOST_ORANGE);
+    tft.setTextColor(GHOST_ORANGE, BG_BLACK);
     tft.setCursor(22, 76);
     tft.print("DISCHARGING");
     drawGhostIcon(10, 80, 4, GHOST_ORANGE);
@@ -275,23 +287,21 @@ void drawStateBadge() {
 // Voltage / current numeric readout
 // ---------------------------------------------------------------------------
 void drawVoltageCurrent() {
-  tft.fillRect(0, 97, SCREEN_W, 12, BG_BLACK);
-
-  char vbuf[8], cbuf[8];
+  char vbuf[10], cbuf[10];
   dtostrf(batt.voltage, 4, 2, vbuf);
   dtostrf(fabs(batt.current), 4, 2, cbuf);
 
-  tft.setTextColor(TEXT_WHITE);
+  tft.setTextColor(TEXT_WHITE, BG_BLACK);
   tft.setTextSize(1);
   tft.setCursor(4, 98);
   tft.print(vbuf);
-  tft.print("V");
+  tft.print("V ");
 
-  tft.setTextColor(batt.isCharging ? BOLT_GREEN : GHOST_ORANGE);
+  tft.setTextColor(batt.isCharging ? BOLT_GREEN : GHOST_ORANGE, BG_BLACK);
   tft.setCursor(74, 98);
   tft.print(batt.isCharging ? "+" : "-");
   tft.print(cbuf);
-  tft.print("A");
+  tft.print("A ");
 }
 
 // ---------------------------------------------------------------------------
