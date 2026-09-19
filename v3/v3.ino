@@ -213,7 +213,18 @@ static void build_splash_screen() {
   lv_obj_set_style_radius(splash_bar, 3, LV_PART_MAIN);
   lv_obj_set_style_radius(splash_bar, 3, LV_PART_INDICATOR);
   lv_bar_set_range(splash_bar, 0, 100);
-  lv_bar_set_value(splash_bar, 40, LV_ANIM_OFF);
+  lv_bar_set_value(splash_bar, 0, LV_ANIM_OFF);
+
+  // Animate the bar value
+  lv_anim_t a_bar;
+  lv_anim_init(&a_bar);
+  lv_anim_set_var(&a_bar, splash_bar);
+  lv_anim_set_values(&a_bar, 0, 100);
+  lv_anim_set_time(&a_bar, 2000);
+  lv_anim_set_playback_time(&a_bar, 0);
+  lv_anim_set_repeat_count(&a_bar, LV_ANIM_REPEAT_INFINITE);
+  lv_anim_set_exec_cb(&a_bar, (lv_anim_exec_xcb_t)lv_bar_set_value);
+  lv_anim_start(&a_bar);
 
   // Status Label
   splash_status_label = lv_label_create(splash_scr);
@@ -221,6 +232,18 @@ static void build_splash_screen() {
   lv_obj_set_style_text_font(splash_status_label, &lv_font_montserrat_12, 0);
   lv_obj_set_style_text_color(splash_status_label, COLOR_TEXT_SECONDARY, 0);
   lv_obj_align(splash_status_label, LV_ALIGN_CENTER, 0, 78);
+
+  // Animate the status label opacity
+  lv_anim_t a_opa;
+  lv_anim_init(&a_opa);
+  lv_anim_set_var(&a_opa, splash_status_label);
+  lv_anim_set_values(&a_opa, LV_OPA_30, LV_OPA_COVER);
+  lv_anim_set_time(&a_opa, 750);
+  lv_anim_set_playback_time(&a_opa, 750);
+  lv_anim_set_repeat_count(&a_opa, LV_ANIM_REPEAT_INFINITE);
+  lv_anim_set_path_cb(&a_opa, lv_anim_path_ease_in_out);
+  lv_anim_set_exec_cb(&a_opa, (lv_anim_exec_xcb_t)lv_obj_set_style_text_opa);
+  lv_anim_start(&a_opa);
 }
 
 // --- 5.2 MAIN DASHBOARD SCREEN ---

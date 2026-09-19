@@ -66,3 +66,9 @@ The BMS replies via notifications on `0xff01`. The reply is fragmented across mu
   3. **Screen 2 (Cell Diagnostics):** 4x4 Grid supporting up to 16 cells dynamically with per-cell mV readouts, mini horizontal health bars, min/max/critical cell color highlights, and bottom MIN/MAX/DELTA summary card.
   4. **Screen 3 (System Health & Alarms):** Total/Remaining Capacity card with progress bar, Cycle count, Pack Temperature, 5-Alarm Protection Grid (OV, UV, OC, SC, OT), and FET Relay Status (CHG/DCHG ON/OFF).
 * **Navigation:** Native LVGL gesture handler (`LV_EVENT_GESTURE`) with left/right swipe animations (`LV_SCR_LOAD_ANIM_MOVE_LEFT/RIGHT`) and bottom 3-dot page indicator with touch tap fallback.
+
+## 6. Performance & Animation Review (Agent E)
+- A full review was performed to ensure V3 graphics and animations safely coexist with the BLE NimBLE stack.
+- Splash screen animations (`lv_anim_t` on loading bar and status label opacity) were verified to be non-blocking.
+- NimBLE `scan->start(0, false)` was verified to be non-blocking in NimBLE 3.0 API, protecting `logicTask` from hanging.
+- Total memory (128KB LVGL heap) and partial rendering bounds are strictly preserved and within safe Flash/RAM margins (33%/57%).
