@@ -894,45 +894,79 @@ static void notificationCallback(NimBLERemoteCharacteristic *, uint8_t *payload,
   }
 }
 
+static bool doConnect = false;
+static bool doScan = true;
+
 class BatteryAdvertisedCallbacks : public NimBLEScanCallbacks {
   void onResult(const NimBLEAdvertisedDevice *device) override {
-    if (!device->haveName()) return;
-    std::string found = device->getName();
-    if (found.find(BATTERY_NAME_MATCH) == std::string::npos) return;
-    batteryAddress = device->getAddress(); haveBatteryAddress = true; scanRunning = false;
-    Serial.printf("battery found: %s (%s)\n", found.c_str(), batteryAddress.toString().c_str());
+    bool match = false;
+    
+    if (device->haveName()) {
+      std::string found = device->getName();
+      if (found.find(BATTERY_NAME_MATCH) != std::string::npos) {
+        match = true;
+      }
+    }
+    
+    if (!match && device->haveServiceUUID()) {
+      if (device->isAdvertisingService(NimBLEUUID("ff00")) || 
+          device->isAdvertisingService(NimBLEUUID("fff0"))) {
+        match = true;
+      }
+    }
+    
+    if (!match) return;
+
     NimBLEDevice::getScan()->stop();
+    batteryAddress = device->getAddress();
+    haveBatteryAddress = true;
+    doConnect = true;
+    doScan = false;
+    Serial.printf("battery found: %s (%s)\n", device->haveName() ? device->getName().c_str() : "Unknown", batteryAddress.toString().c_str());
   }
 };
 
 class BatteryClientCallbacks : public NimBLEClientCallbacks {
-  void onConnect(NimBLEClient *client) override {
+  void onConnect(NimBLEClient *c) override {
     batteryConnected = true;
     Serial.println("BLE connected");
   }
-  void onDisconnect(NimBLEClient *, int reason) override {
-    batteryConnected = false; commandChar = nullptr; haveBatteryAddress = false;
+  void onDisconnect(NimBLEClient *c, int reason) override {
+    batteryConnected = false;
+    commandChar = nullptr;
+    haveBatteryAddress = false;
+    doScan = true;
     Serial.printf("BLE disconnected, reason=%d\n", reason);
   }
 };
 
-static bool findAndConnectBattery() {
-  if (!haveBatteryAddress) {
-    if (!scanRunning) {
-      NimBLEScan *scan = NimBLEDevice::getScan(); scan->setScanCallbacks(new BatteryAdvertisedCallbacks(), true);
-      scan->setInterval(80); scan->setWindow(60); scan->setActiveScan(true); scanRunning = true;
-      scan->start(0, false);
-    }
+static bool connectToServer() {
+  if (client) {
+    NimBLEDevice::deleteClient(client);
+    client = nullptr;
+  }
+  client = NimBLEDevice::createClient();
+  client->setClientCallbacks(new BatteryClientCallbacks(), true);
+  
+  if (!client->connect(batteryAddress)) {
+    NimBLEDevice::deleteClient(client);
+    client = nullptr;
+    haveBatteryAddress = false;
     return false;
   }
-  if (client) { NimBLEDevice::deleteClient(client); client = nullptr; }
-  client = NimBLEDevice::createClient(); client->setClientCallbacks(new BatteryClientCallbacks(), true);
-  if (!client->connect(batteryAddress)) { NimBLEDevice::deleteClient(client); client = nullptr; haveBatteryAddress = false; return false; }
+  
   NimBLERemoteService *service = client->getService("0000ff00-0000-1000-8000-00805f9b34fb");
+  if (!service) service = client->getService("0000fff0-0000-1000-8000-00805f9b34fb");
   if (!service) { client->disconnect(); return false; }
+  
   NimBLERemoteCharacteristic *notifyChar = service->getCharacteristic("0000ff01-0000-1000-8000-00805f9b34fb");
   commandChar = service->getCharacteristic("0000ff02-0000-1000-8000-00805f9b34fb");
-  if (!notifyChar || !commandChar || !notifyChar->subscribe(true, notificationCallback)) { client->disconnect(); commandChar = nullptr; return false; }
+  
+  if (!notifyChar || !commandChar || !notifyChar->subscribe(true, notificationCallback)) {
+    client->disconnect();
+    commandChar = nullptr;
+    return false;
+  }
   return true;
 }
 
@@ -953,18 +987,39 @@ static void pollBattery() {
 // 8. FREERTOS TASK LOOPS
 // ============================================================================
 static void logicTask(void *) {
-  uint32_t lastConnectMs = 0, lastPollMs = 0;
+  uint32_t lastPollMs = 0;
+  
+  // Setup NimBLE Scanner once
+  NimBLEScan *scan = NimBLEDevice::getScan();
+  scan->setScanCallbacks(new BatteryAdvertisedCallbacks(), false); // DO NOT ask for duplicates!
+  scan->setInterval(80);
+  scan->setWindow(60);
+  scan->setActiveScan(true);
+
   for (;;) {
     uint32_t now = millis();
-    if ((!client || !client->isConnected()) && now - lastConnectMs >= 6000) { 
-      lastConnectMs = now; 
-      findAndConnectBattery(); 
+    
+    if (doConnect) {
+      if (connectToServer()) {
+        Serial.println("Connected to BMS.");
+      } else {
+        Serial.println("Failed to connect, restarting scan...");
+        doScan = true;
+      }
+      doConnect = false;
     }
+    
+    if (doScan) {
+      scan->start(0, false);
+      doScan = false;
+    }
+
     if (batteryConnected && now - lastPollMs >= 250) { 
       lastPollMs = now; 
       pollBattery(); 
     }
-    vTaskDelay(pdMS_TO_TICKS(20));
+    
+    vTaskDelay(pdMS_TO_TICKS(50));
   }
 }
 
