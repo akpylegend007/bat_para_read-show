@@ -63,3 +63,58 @@ The project is being migrated from the dual-core ESP32-WROOM-32 to the single-co
 * **V2 TFT Wiring on C3:** The ST7735 SPI display requires 5 pins. Default hardware SPI on C3 is SCK=4, MOSI=6. CS, DC, and RST can be mapped to any available GPIOs.
 * **Expansion Potential:** Wiring the display leaves ~8 free GPIOs on the SuperMini, which can be used for future features: physical buttons/encoders for UI navigation, buzzers for BMS alarms, Neopixel status LEDs, relay load control, or I2C environmental sensors (BME280).
 * **Compilation:** Requires changing the Arduino CLI board target from esp32:esp32:esp32 to esp32:esp32:esp32c3.
+
+## 7. Waveshare ESP32-S3 Touch LCD 2.8 Hardware Reference (SKU: 27690)
+Extracted directly from the official Waveshare vendor package (`resources_waveshare_2_8_inch_display`):
+
+### Microcontroller & Memory
+* **SoC:** ESP32-S3R8 (Xtensa 32-bit LX7 dual-core up to 240MHz)
+* **Flash:** 16MB Quad-SPI
+* **PSRAM:** 8MB Octal-SPI
+* **Target Board in Arduino:** `ESP32S3 Dev Module` (Flash Size: 16MB, PSRAM: OPI PSRAM)
+
+### ST7789 Display (240 x 320 IPS)
+* **SPI Bus:** `FSPI` (`SPIClass LCDspi(FSPI)`)
+* **Clock Frequency:** Up to 80MHz (`SPISettings(80000000, MSBFIRST, SPI_MODE0)`)
+* **MOSI:** GPIO 45
+* **SCLK:** GPIO 40
+* **MISO:** NC (-1)
+* **CS:** GPIO 42
+* **DC:** GPIO 41
+* **RST:** GPIO 39
+* **Backlight (BL):** GPIO 5 (PWM via LEDC, 20kHz, 10-bit resolution)
+
+### Power Control & Battery ADC
+* **PWR_Control_PIN:** GPIO 7 (Output). **Crucial:** Must drive `HIGH` to maintain battery/system power latch. Driving `LOW` turns off board power.
+* **PWR_KEY_Input_PIN:** GPIO 6 (Input, Active Low button for sleep/power control).
+* **BAT_ADC_PIN:** GPIO 8 (Analog input reading onboard single-cell lipo voltage with `Measurement_offset = 0.990476`).
+
+### Touch Controller (CST328 Capacitive 5-point Touch)
+* **Bus:** Dedicated `Wire1`
+* **SDA:** GPIO 1
+* **SCL:** GPIO 3
+* **INT:** GPIO 4 (Interrupt mode: RISING)
+* **RST:** GPIO 2
+* **I2C Address:** `0x1A`
+* **Frequency:** 400kHz
+
+### System I2C Bus (Wire)
+* **SDA:** GPIO 11
+* **SCL:** GPIO 10
+* **RTC:** PCF85063 (Address: `0x51`)
+* **6-Axis IMU:** QMI8658 Gyro/Accel (Address: `0x6B`)
+
+### Audio & Storage
+* **I2S DAC (PCM5101):** DOUT=47, BCLK=48, LRC/WS=38
+* **MicroSD Slot (SD_MMC):** CLK=14, CMD=17, D0=16, D3=21
+
+### Layout & UI Scaling Strategy for 240x320
+* **Previous UI (v2):** 128x128 square.
+* **New Display (v3):** 240x320 portrait (or 320x240 landscape).
+* **Scaling Factors:** Width ~1.875x, Height ~2.5x.
+* **Layout Geometry:**
+  - Header Maze Bar: Full 240px width with Pacman title
+  - Big SOC digits: Center 240px with enlarged font (Size 6-7 or custom scalable graphics)
+  - Pellet Bar: Increased to 15-20 pellets or scaled pellets across 240px width
+  - Status Badge ("CHARGING" / "DRAINING" / "IDLE"): Scaled size 3-4 text
+  - Dual Volts / Amps readout: Spanning 240px with clean dual-column layout

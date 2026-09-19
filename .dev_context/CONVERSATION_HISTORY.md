@@ -19,3 +19,12 @@ This document tracks the step-by-step evolution of the project across AI chat se
 * **Resolution:** Confirmed it is a highly feasible upgrade. The C3's RISC-V core and BT 5.0 LE radio are perfectly suited for this. 
 * **Planning:** Mapped out that the V2 SPI display requires 5 pins (using C3 defaults SCK=4, MOSI=6), leaving ~8 free GPIOs on the SuperMini for future features (buzzers, buttons, I2C sensors, relay load disconnects). Documented in `DEVELOPER_HANDOFF.md`.
 * **System Integration:** Established `GEMINI.md` Workspace Rules to force future AI agents to automatically read the Handoff and History documents before assisting the user.
+
+## Session 4: Waveshare ESP32-S3 Touch LCD 2.8 Analysis & Architecture
+* **The Request:** Analyze the official vendor files (`resources_waveshare_2_8_inch_display`) for the Waveshare ESP32-S3 Touch LCD 2.8 (SKU 27690), extract the exact hardware specs, drivers, pinouts, and power requirements into permanent project memory, and plan the fresh 3rd iteration porting the telemetry and Pacman UI logic.
+* **Analysis & Extraction:**
+  - Extracted display controller (ST7789 via FSPI: MOSI=45, SCLK=40, CS=42, DC=41, RST=39, BL=5).
+  - Uncovered crucial power latching requirement: `GPIO 7` (PWR_Control_PIN) must be asserted `HIGH` to maintain battery/system power.
+  - Extracted touch controller (CST328 via dedicated Wire1: SDA=1, SCL=3, INT=4, RST=2).
+  - Extracted secondary peripherals: PCF85063 RTC & QMI8658 IMU on Wire (SDA=11, SCL=10), PCM5101 I2S audio (DOUT=47, BCLK=48, LRC=38), MicroSD on SD_MMC (14, 17, 16, 21), and Battery ADC (GPIO 8).
+  - Recorded in `.dev_context/DEVELOPER_HANDOFF.md` Section 7 for future instant retrieval without needing to parse the full 70+ vendor files.
