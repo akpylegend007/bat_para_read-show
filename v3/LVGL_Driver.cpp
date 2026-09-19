@@ -65,7 +65,7 @@ void Lvgl_Init(void)
   disp_drv.hor_res = LVGL_WIDTH;
   disp_drv.ver_res = LVGL_HEIGHT;
   disp_drv.flush_cb = Lvgl_Display_LCD;
-  disp_drv.full_refresh = 1;                    /**< 1: Always make the whole screen redrawn*/
+  disp_drv.full_refresh = 0;                    /**< 0: Partial refresh (only redraw dirty areas)*/
   disp_drv.draw_buf = &draw_buf;
   lv_disp_drv_register( &disp_drv );
 
@@ -75,11 +75,6 @@ void Lvgl_Init(void)
   indev_drv.type = LV_INDEV_TYPE_POINTER;
   indev_drv.read_cb = Lvgl_Touchpad_Read;
   lv_indev_drv_register( &indev_drv );
-
-  /* Create simple label */
-  lv_obj_t *label = lv_label_create( lv_scr_act() );
-  lv_label_set_text( label, "Hello Ardino and LVGL!");
-  lv_obj_align( label, LV_ALIGN_CENTER, 0, 0 );
 
   const esp_timer_create_args_t lvgl_tick_timer_args = {
     .callback = &example_increase_lvgl_tick,
