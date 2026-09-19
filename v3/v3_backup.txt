@@ -1,0 +1,508 @@
+#include <Arduino.h>
+#include <SPI.h>
+#include <Wire.h>
+#include <WiFi.h>
+#include <WebServer.h>
+#include <Update.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_ST7789.h>
+#include <NimBLEDevice.h>
+#include "Touch_CST328.h"
+// Read-only BMS monitor. This is the Bluetooth name, or a unique part of it.
+// Change it to the name advertised by your own battery if the scan log shows a different name.
+
+struct Telemetry {
+  bool valid = false;
+  float voltage = 0.0f;
+  float current = 0.0f;
+  float remainingAh = 0.0f;
+  float designAh = 0.0f;
+  uint16_t cycles = 0;
+  int16_t temperatureC = 0;
+  uint8_t soc = 0;
+  uint16_t protection = 0;
+  uint32_t balanceMaskLow = 0;
+  uint32_t balanceMaskHigh = 0;
+  bool chargeFet = false;
+  bool dischargeFet = false;
+  int rssi = -127;
+};
+
+
+// Forward declarations
+
+// Forward declarations
+
+// Forward declarations
+static uint16_t be16(const uint8_t *p);
+static int16_t signedBe16(const uint8_t *p);
+static uint32_t be32(const uint8_t *p);
+static bool telemetryChanged(const Telemetry &a, const Telemetry &b);
+static Telemetry snapshotTelemetry();
+static String alarmText(const Telemetry &d);
+static uint8_t balanceCount(const Telemetry &d);
+static String balanceCellsText(const Telemetry &d);
+static void drawPacman(int16_t x, int16_t y, int16_t r);
+static void drawGhost(int16_t x, int16_t y, uint16_t color);
+static void drawMazeFrame(const char *title);
+static void drawFooter();
+static void drawMainStatic();
+static void drawMainDynamic(const Telemetry &d);
+static void drawHealthStatic();
+static void drawHealthDynamic(const Telemetry &d);
+static void drawDiagnosticsStatic();
+static void drawDiagnosticsDynamic(const Telemetry &d);
+static void drawBalanceStatic();
+static void drawBalanceDynamic(const Telemetry &d);
+static void drawFullPage(const Telemetry &d);
+static void drawChangedValues(const Telemetry &d);
+static void printClipped(const String &text, int16_t x, int16_t y, uint8_t size, uint16_t foreground, uint16_t background);
+static bool parseJbdFrame(const uint8_t *frame, size_t length);
+static void notificationCallback(NimBLERemoteCharacteristic *, uint8_t *payload, size_t length, bool);
+static bool findAndConnectBattery();
+static void pollBattery();
+static void startOtaPortal();
+static void stopOtaPortal();
+static void initTouch();
+static bool readTouchPoint(uint16_t &x, uint16_t &y);
+static void serviceTouch();
+static void logicTask(void *);
+static void uiTask(void *);
+
+static const char *BATTERY_NAME_MATCH = "CE024AA005260138";
+
+// The local update Wi-Fi is OFF normally so it does not compete with BLE.
+// Hold the screen for 1.2 seconds to toggle it. Connect to this network and open 192.168.4.1.
+static const char *OTA_AP_NAME = "PAC-BATTERY-UPDATE";
+static const char *OTA_AP_PASSWORD = "pacbattery2026";
+
+static constexpr uint8_t LCD_MOSI = 45;
+static constexpr uint8_t LCD_SCK = 40;
+static constexpr uint8_t LCD_CS = 42;
+static constexpr uint8_t LCD_DC = 41;
+static constexpr uint8_t LCD_RST = 39;
+static constexpr uint8_t LCD_BL = 5;
+// Waveshare's PWR_Key example defines the battery power key and hold latch.
+// GPIO 7 must stay high after a button-start to keep battery power applied.
+static constexpr uint8_t PWR_KEY_INPUT = 6;
+static constexpr uint8_t PWR_CONTROL = 7;
+
+static constexpr uint16_t SCREEN_W = 240;
+static constexpr uint16_t SCREEN_H = 320;
+static constexpr uint16_t C_BG = 0x0000;
+static constexpr uint16_t C_WALL = 0x001F;
+static constexpr uint16_t C_DOT = 0xFFE0;
+static constexpr uint16_t C_TEXT = 0xFFFF;
+static constexpr uint16_t C_DIM = 0x8410;
+static constexpr uint16_t C_PAC = 0xFFE0;
+static constexpr uint16_t C_PINK = 0xF97F;
+static constexpr uint16_t C_CYAN = 0x07FF;
+static constexpr uint16_t C_RED = 0xF800;
+static constexpr uint16_t C_ORANGE = 0xFD20;
+static constexpr uint16_t C_GREEN = 0x07E0;
+
+
+
+Adafruit_ST7789 lcd(LCD_CS, LCD_DC, LCD_RST);
+WebServer otaServer(80);
+SemaphoreHandle_t telemetryMutex;
+SemaphoreHandle_t uiMutex;
+
+Telemetry telemetry;
+NimBLEClient *client = nullptr;
+NimBLERemoteCharacteristic *commandChar = nullptr;
+NimBLEAddress batteryAddress;
+bool haveBatteryAddress = false;
+volatile bool batteryConnected = false;
+volatile bool scanRunning = false;
+volatile bool dataDirty = true;
+volatile bool frameDirty = true;
+volatile bool otaToggleRequested = false;
+volatile bool otaActive = false;
+volatile uint8_t page = 0;
+uint8_t rxFrame[160];
+size_t rxLength = 0;
+
+static uint16_t be16(const uint8_t *p) {
+  return (static_cast<uint16_t>(p[0]) << 8) | p[1];
+}
+static int16_t signedBe16(const uint8_t *p) { return static_cast<int16_t>(be16(p)); }
+static uint32_t be32(const uint8_t *p) {
+  return (static_cast<uint32_t>(p[0]) << 24) | (static_cast<uint32_t>(p[1]) << 16) |
+         (static_cast<uint32_t>(p[2]) << 8) | p[3];
+}
+
+static bool telemetryChanged(const Telemetry &a, const Telemetry &b) {
+  return a.valid != b.valid || a.voltage != b.voltage || a.current != b.current ||
+         a.remainingAh != b.remainingAh || a.designAh != b.designAh || a.cycles != b.cycles ||
+         a.temperatureC != b.temperatureC || a.soc != b.soc || a.protection != b.protection ||
+         a.balanceMaskLow != b.balanceMaskLow || a.balanceMaskHigh != b.balanceMaskHigh ||
+         a.chargeFet != b.chargeFet || a.dischargeFet != b.dischargeFet || a.rssi != b.rssi;
+}
+
+static Telemetry snapshotTelemetry() {
+  Telemetry copy;
+  xSemaphoreTake(telemetryMutex, portMAX_DELAY);
+  copy = telemetry;
+  xSemaphoreGive(telemetryMutex);
+  return copy;
+}
+
+static const char *modeText(const Telemetry &d) {
+  if (d.current > 0.15f) return "CHARGING";
+  if (d.current < -0.15f) return "DISCHARGING";
+  return "IDLE";
+}
+static String alarmText(const Telemetry &d) {
+  if (d.protection == 0) return "CLEAR";
+  String out;
+  if (d.protection & 0x0001) out += "CELL OV ";
+  if (d.protection & 0x0002) out += "CELL UV ";
+  if (d.protection & 0x0004) out += "PACK OV ";
+  if (d.protection & 0x0008) out += "PACK UV ";
+  if (d.protection & 0x0010) out += "CHG OC ";
+  if (d.protection & 0x0020) out += "DSG OC ";
+  if (d.protection & 0x0040) out += "SHORT ";
+  if (d.protection & 0x0F00) out += "TEMP ";
+  return out.length() ? out : "BMS FAULT";
+}
+static uint8_t balanceCount(const Telemetry &d) {
+  return __builtin_popcount(d.balanceMaskLow) + __builtin_popcount(d.balanceMaskHigh);
+}
+static String balanceCellsText(const Telemetry &d) {
+  String out;
+  for (uint8_t cell = 0; cell < 32; ++cell) if (d.balanceMaskLow & (1UL << cell)) out += (out.length() ? " " : "") + String("C") + String(cell + 1);
+  for (uint8_t cell = 0; cell < 32; ++cell) if (d.balanceMaskHigh & (1UL << cell)) out += (out.length() ? " " : "") + String("C") + String(cell + 33);
+  return out.length() ? out : "NONE";
+}
+
+// All functions below this point are called only by the UI task on core 1.
+static void drawPacman(int16_t x, int16_t y, int16_t r) {
+  lcd.fillCircle(x, y, r, C_PAC);
+  lcd.fillTriangle(x, y, x + r + 2, y - r / 2, x + r + 2, y + r / 2, C_BG);
+  lcd.fillCircle(x - r / 4, y - r / 2, 2, C_BG);
+}
+static void drawGhost(int16_t x, int16_t y, uint16_t color) {
+  lcd.fillRoundRect(x, y, 20, 18, 8, color);
+  lcd.fillRect(x, y + 10, 20, 9, color);
+  lcd.fillTriangle(x, y + 18, x + 5, y + 12, x + 9, y + 18, C_BG);
+  lcd.fillTriangle(x + 10, y + 18, x + 14, y + 12, x + 19, y + 18, C_BG);
+  lcd.fillCircle(x + 6, y + 7, 3, C_TEXT); lcd.fillCircle(x + 14, y + 7, 3, C_TEXT);
+  lcd.fillCircle(x + 7, y + 8, 1, C_WALL); lcd.fillCircle(x + 15, y + 8, 1, C_WALL);
+}
+static void drawMazeFrame(const char *title) {
+  lcd.fillScreen(C_BG);
+  lcd.drawRoundRect(5, 5, 230, 310, 10, C_WALL);
+  lcd.drawRoundRect(9, 9, 222, 302, 8, C_WALL);
+  lcd.fillRoundRect(20, 17, 200, 24, 5, C_WALL);
+  lcd.setTextColor(C_DOT, C_WALL); lcd.setTextSize(2); lcd.setCursor(28, 22); lcd.print(title);
+  lcd.setTextColor(C_DIM, C_BG); lcd.setTextSize(1); lcd.setCursor(18, 48);
+  lcd.print(batteryConnected ? "JBD LINK  *  LIVE DATA" : "SEARCHING FOR BATTERY...");
+  lcd.drawFastHLine(18, 61, 204, C_WALL);
+}
+static void drawFooter() {
+  lcd.drawFastHLine(18, 284, 204, C_WALL);
+  lcd.setTextColor(C_DIM, C_BG); lcd.setTextSize(1); lcd.setCursor(19, 294); lcd.printf("P%u/4", page + 1);
+  lcd.setCursor(65, 294); lcd.print(otaActive ? "OTA: 192.168.4.1" : "SWIPE / HOLD OTA");
+}
+static void drawMainStatic() {
+  drawMazeFrame("PAC-BATTERY");
+  lcd.setTextColor(C_DIM, C_BG); lcd.setTextSize(1); lcd.setCursor(22, 136); lcd.print("POWER PELLETS");
+  lcd.drawFastHLine(22, 217, 196, C_WALL);
+  lcd.setCursor(25, 227); lcd.print("VOLT"); lcd.setCursor(142, 227); lcd.print("CURR");
+  drawFooter();
+}
+static void drawMainDynamic(const Telemetry &d) {
+  // Clear only the specific dynamic areas using padded strings instead of full-screen fillRect!
+  uint16_t socColor = d.soc >= 50 ? C_PAC : (d.soc >= 20 ? C_ORANGE : C_RED);
+  lcd.setTextColor(socColor, C_BG); lcd.setTextSize(6); lcd.setCursor(38, 75); lcd.printf("%-3u", d.soc);
+  lcd.setTextSize(3); lcd.print("% ");
+  
+  // Clear the pellet/pacman/ghost row
+  lcd.fillRect(17, 145, 206, 32, C_BG); 
+  uint8_t pellets = (d.soc * 10) / 100, eaten = 10 - pellets;
+  for (uint8_t i = 0; i < 10; ++i) if (i >= eaten) lcd.fillCircle(30 + i * 19, 158, 4, C_DOT);
+  int pacX = 30 + eaten * 19 - 10; if (pacX < 17) pacX = 17; drawPacman(pacX, 158, 10);
+  if (eaten > 1) drawGhost(18, 176, d.current >= 0 ? C_CYAN : C_RED);
+  
+  lcd.fillRoundRect(55, 178, 148, 26, 6, C_WALL);
+  lcd.setTextColor(d.current >= 0 ? C_GREEN : C_ORANGE, C_WALL); lcd.setTextSize(2);
+  const char* modeStr = modeText(d);
+  int modeX = 55 + (148 - strlen(modeStr) * 12) / 2; // Center text properly
+  lcd.setCursor(modeX, 184); lcd.print(modeStr);
+  
+  lcd.setTextColor(C_CYAN, C_BG); lcd.setTextSize(3); lcd.setCursor(24, 242); lcd.printf("%-5.1fV", d.voltage);
+  lcd.setTextColor(d.current >= 0 ? C_GREEN : C_ORANGE, C_BG); lcd.setCursor(139, 242); lcd.printf("%+-5.1fA", d.current);
+}
+static void drawHealthStatic() {
+  drawMazeFrame("POWER UP"); drawGhost(23, 75, C_PINK); drawGhost(196, 75, C_CYAN);
+  lcd.setTextColor(C_TEXT, C_BG); lcd.setTextSize(2); lcd.setCursor(57, 80); lcd.print("SYSTEM HEALTH");
+  lcd.drawFastHLine(22, 110, 196, C_WALL); lcd.setTextColor(C_DOT, C_BG); lcd.setTextSize(1); lcd.setCursor(24, 124); lcd.print("CAPACITY");
+  lcd.drawFastHLine(22, 191, 196, C_WALL); lcd.setCursor(24, 205); lcd.print("CYCLE COUNT"); lcd.setCursor(133, 205); lcd.print("PEAK TEMP"); drawFooter();
+}
+static void drawHealthDynamic(const Telemetry &d) {
+  lcd.setTextColor(C_CYAN, C_BG); lcd.setTextSize(3); lcd.setCursor(24, 140); lcd.printf("%-5.1f", d.remainingAh);
+  lcd.setTextSize(1); lcd.print(" Ah LEFT   "); lcd.setTextColor(C_DIM, C_BG); lcd.setCursor(25, 174); lcd.printf("OUT OF %-5.1f Ah DESIGN ", d.designAh);
+  lcd.setTextColor(C_GREEN, C_BG); lcd.setTextSize(3); lcd.setCursor(24, 220); lcd.printf("%-4u", d.cycles); lcd.setCursor(135, 220); lcd.printf("%-3dC", d.temperatureC);
+}
+static void drawDiagnosticsStatic() {
+  drawMazeFrame("GHOST WATCH");
+  lcd.setTextColor(C_DIM, C_BG); lcd.setTextSize(1); lcd.setCursor(56, 78); lcd.print("CURRENT MODE");
+  lcd.drawFastHLine(22, 126, 196, C_WALL); lcd.setCursor(23, 140); lcd.print("BMS ALARMS"); drawFooter();
+}
+static void drawDiagnosticsDynamic(const Telemetry &d) {
+  drawGhost(23, 75, d.protection ? C_RED : C_CYAN);
+  lcd.setTextColor(d.current >= 0 ? C_GREEN : C_ORANGE, C_BG); lcd.setTextSize(2); lcd.setCursor(56, 93); lcd.printf("%-11s", modeText(d));
+  // Alarm text can be longer than a screen row; never allow it to wrap.
+  lcd.fillRect(23, 156, 196, 16, C_BG); // clear alarm line just in case
+  printClipped(alarmText(d), 23, 156, 1, d.protection ? C_RED : C_GREEN, C_BG);
+  lcd.setTextColor(C_TEXT, C_BG); lcd.setTextSize(1); lcd.setCursor(23, 203); lcd.printf("CHARGE GATE:    %-6s", d.chargeFet ? "OPEN" : "CLOSED");
+  lcd.setCursor(23, 221); lcd.printf("DISCHARGE GATE: %-6s", d.dischargeFet ? "OPEN" : "CLOSED"); lcd.setCursor(23, 244); lcd.printf("STATUS: 0x%04X RSSI:%-4d", d.protection, d.rssi);
+}
+static void drawBalanceStatic() {
+  drawMazeFrame("BALANCE LAB"); lcd.setTextColor(C_DIM, C_BG); lcd.setTextSize(1); lcd.setCursor(56, 78); lcd.print("CELL BALANCING");
+  lcd.drawFastHLine(22, 127, 196, C_WALL); lcd.setCursor(23, 140); lcd.print("BALANCING CELLS"); lcd.setCursor(23, 207); lcd.print("MASK LOW"); lcd.setCursor(131, 207); lcd.print("MASK HIGH"); drawFooter();
+}
+static void drawBalanceDynamic(const Telemetry &d) {
+  drawGhost(23, 75, balanceCount(d) ? C_PINK : C_CYAN);
+  lcd.setTextColor(balanceCount(d) ? C_PAC : C_GREEN, C_BG); lcd.setTextSize(3); lcd.setCursor(57, 94); lcd.printf("%-2u ACTIVE ", balanceCount(d));
+  // An active-cell list can be long; keep it inside this single value row.
+  lcd.fillRect(23, 157, 196, 16, C_BG); // clear active cells line
+  printClipped(balanceCellsText(d), 23, 157, 1, C_TEXT, C_BG);
+  lcd.setTextColor(C_CYAN, C_BG); lcd.setTextSize(1); lcd.setCursor(23, 223); lcd.printf("%08lX", (unsigned long)d.balanceMaskLow); lcd.setCursor(131, 223); lcd.printf("%08lX", (unsigned long)d.balanceMaskHigh);
+  lcd.setTextColor(C_DIM, C_BG); lcd.setCursor(23, 249); lcd.print("READ-ONLY BMS TELEMETRY");
+}
+// Keep long values on their own row rather than wrapping over the row below.
+static void printClipped(const String &text, int16_t x, int16_t y, uint8_t size, uint16_t foreground, uint16_t background) {
+  lcd.setTextWrap(false);
+  lcd.setTextColor(foreground, background);
+  lcd.setTextSize(size);
+  lcd.setCursor(x, y);
+  lcd.print(text);
+}
+static void drawFullPage(const Telemetry &d) {
+  if (page == 0) { drawMainStatic(); drawMainDynamic(d); }
+  else if (page == 1) { drawHealthStatic(); drawHealthDynamic(d); }
+  else if (page == 2) { drawDiagnosticsStatic(); drawDiagnosticsDynamic(d); }
+  else { drawBalanceStatic(); drawBalanceDynamic(d); }
+}
+static void drawChangedValues(const Telemetry &d) {
+  if (page == 0) drawMainDynamic(d);
+  else if (page == 1) drawHealthDynamic(d);
+  else if (page == 2) drawDiagnosticsDynamic(d);
+  else drawBalanceDynamic(d);
+}
+
+static bool parseJbdFrame(const uint8_t *frame, size_t length) {
+  if (length < 34 || frame[0] != 0xDD || frame[1] != 0x03 || frame[length - 1] != 0x77) return false;
+  const uint8_t payloadLength = frame[3];
+  if (payloadLength < 27 || length != static_cast<size_t>(payloadLength) + 7) return false;
+  const uint8_t *p = &frame[4];
+  Telemetry next = snapshotTelemetry();
+  next.voltage = be16(p) / 100.0f; next.current = signedBe16(p + 2) / 100.0f;
+  next.remainingAh = be16(p + 4) / 100.0f; next.designAh = be16(p + 6) / 100.0f; next.cycles = be16(p + 8);
+  // JBD basic-information (0x03) payload layout: balance mask 12..15,
+  // protection 16..17, firmware 18, RSOC 19, FET state 20, NTC count 21,
+  // then 0.1 K temperature values beginning at 22. Do not treat the first
+  // temperature byte as SOC: that produces a plausible-looking but wrong %.
+  next.balanceMaskLow = be32(p + 12);
+  next.balanceMaskHigh = 0;  // Basic-info 0x03 carries one 32-cell balance mask.
+  next.protection = be16(p + 16);
+  next.soc = p[19];
+  next.chargeFet = (p[20] & 0x01) != 0;
+  next.dischargeFet = (p[20] & 0x02) != 0;
+  if (p[21] > 0 && payloadLength >= 24) next.temperatureC = static_cast<int16_t>(be16(p + 22) / 10) - 273;
+  next.valid = true;
+  xSemaphoreTake(telemetryMutex, portMAX_DELAY);
+  bool changed = telemetryChanged(telemetry, next); telemetry = next;
+  xSemaphoreGive(telemetryMutex);
+  if (changed) dataDirty = true;
+  Serial.printf("JBD data: SOC=%u V=%.2f I=%.2f\n", next.soc, next.voltage, next.current);
+  return true;
+}
+static void notificationCallback(NimBLERemoteCharacteristic *, uint8_t *payload, size_t length, bool) {
+  for (size_t i = 0; i < length; ++i) {
+    if (rxLength == 0 && payload[i] != 0xDD) continue;
+    if (rxLength >= sizeof(rxFrame)) { rxLength = 0; continue; }
+    rxFrame[rxLength++] = payload[i];
+    if (rxLength >= 4) {
+      size_t expected = static_cast<size_t>(rxFrame[3]) + 7;
+      if (expected > sizeof(rxFrame)) rxLength = 0;
+      else if (rxLength == expected) { parseJbdFrame(rxFrame, rxLength); rxLength = 0; }
+    }
+  }
+}
+class BatteryAdvertisedCallbacks : public NimBLEScanCallbacks {
+  void onResult(const NimBLEAdvertisedDevice *device) override {
+    if (!device->haveName()) return;
+    std::string found = device->getName();
+    if (found.find(BATTERY_NAME_MATCH) == std::string::npos) return;
+    batteryAddress = device->getAddress(); haveBatteryAddress = true; scanRunning = false;
+    Serial.printf("battery found: %s (%s)\n", found.c_str(), batteryAddress.toString().c_str());
+    NimBLEDevice::getScan()->stop();
+  }
+};
+class BatteryClientCallbacks : public NimBLEClientCallbacks {
+  void onConnect(NimBLEClient *) override { batteryConnected = true; frameDirty = true; Serial.println("BLE connected"); }
+  void onDisconnect(NimBLEClient *, int reason) override {
+    batteryConnected = false; commandChar = nullptr; haveBatteryAddress = false; frameDirty = true;
+    Serial.printf("BLE disconnected, reason=%d\n", reason);
+  }
+};
+static bool findAndConnectBattery() {
+  if (!haveBatteryAddress) {
+    if (!scanRunning) {
+      NimBLEScan *scan = NimBLEDevice::getScan(); scan->setScanCallbacks(new BatteryAdvertisedCallbacks(), true);
+      scan->setInterval(80); scan->setWindow(60); scan->setActiveScan(true); scanRunning = true;
+      Serial.printf("BLE scan: continuously looking for name containing '%s'\n", BATTERY_NAME_MATCH);
+      // A finite scan used to end after five seconds while scanRunning remained true,
+      // preventing every later connection attempt. Keep scanning until the matching BMS is found.
+      scan->start(0, false);
+    }
+    return false;
+  }
+  if (client) { NimBLEDevice::deleteClient(client); client = nullptr; }
+  Serial.println("connecting to matched battery"); client = NimBLEDevice::createClient(); client->setClientCallbacks(new BatteryClientCallbacks(), true);
+  if (!client->connect(batteryAddress)) { Serial.println("BLE connection failed"); NimBLEDevice::deleteClient(client); client = nullptr; haveBatteryAddress = false; return false; }
+  NimBLERemoteService *service = client->getService("0000ff00-0000-1000-8000-00805f9b34fb");
+  if (!service) { Serial.println("FF00 service missing"); client->disconnect(); return false; }
+  NimBLERemoteCharacteristic *notifyChar = service->getCharacteristic("0000ff01-0000-1000-8000-00805f9b34fb");
+  commandChar = service->getCharacteristic("0000ff02-0000-1000-8000-00805f9b34fb");
+  if (!notifyChar || !commandChar) { Serial.println("FF01 or FF02 characteristic missing"); client->disconnect(); commandChar = nullptr; return false; }
+  if (!notifyChar->subscribe(true, notificationCallback)) { Serial.println("FF01 notification subscription failed"); client->disconnect(); commandChar = nullptr; return false; }
+  Serial.println("BLE link subscribed; read-only JBD polling begins"); return true;
+}
+static void pollBattery() {
+  static const uint8_t request[] = {0xDD, 0xA5, 0x03, 0x00, 0xFF, 0xFD, 0x77};
+  if (!client || !client->isConnected() || !commandChar) return;
+  Telemetry now = snapshotTelemetry(); now.rssi = client->getRssi();
+  xSemaphoreTake(telemetryMutex, portMAX_DELAY); bool changed = telemetry.rssi != now.rssi; telemetry.rssi = now.rssi; xSemaphoreGive(telemetryMutex); if (changed) dataDirty = true;
+  if (!commandChar->writeValue(request, sizeof(request), false)) Serial.println("JBD read request write failed");
+}
+
+static const char OTA_FORM[] PROGMEM = R"HTML(<!doctype html><html><body style='background:#000;color:#ffe600;font-family:monospace'><h2>PAC-BATTERY UPDATE</h2><p>ESP32 firmware only. The BMS is never written.</p><form method='POST' action='/update' enctype='multipart/form-data'><input type='file' name='firmware' accept='.bin' required><button type='submit'>Install update</button></form></body></html>)HTML";
+static void startOtaPortal() {
+  WiFi.mode(WIFI_AP); WiFi.softAP(OTA_AP_NAME, OTA_AP_PASSWORD);
+  otaServer.on("/", HTTP_GET, []() { otaServer.send_P(200, "text/html", OTA_FORM); });
+  otaServer.on("/update", HTTP_POST, []() {
+    otaServer.sendHeader("Connection", "close"); otaServer.send(200, "text/plain", Update.hasError() ? "Update failed" : "Update complete. Restarting.");
+    delay(500); ESP.restart();
+  }, []() {
+    HTTPUpload &upload = otaServer.upload();
+    if (upload.status == UPLOAD_FILE_START) Update.begin(UPDATE_SIZE_UNKNOWN);
+    else if (upload.status == UPLOAD_FILE_WRITE) Update.write(upload.buf, upload.currentSize);
+    else if (upload.status == UPLOAD_FILE_END) Update.end(true);
+  });
+  otaServer.begin(); otaActive = true; frameDirty = true; Serial.println("OTA AP active at 192.168.4.1");
+}
+static void stopOtaPortal() { otaServer.stop(); WiFi.softAPdisconnect(true); WiFi.mode(WIFI_OFF); otaActive = false; frameDirty = true; Serial.println("OTA AP stopped"); }
+
+static void serviceTouch() {
+  static bool tracking = false;
+  static uint16_t startX = 0, latestX = 0;
+  static uint32_t startedMs = 0, lastDownMs = 0, lastGestureMs = 0;
+  
+  if (Touch_interrupts) {
+    Touch_interrupts = false;
+    Touch_Read_Data();
+  }
+  
+  uint16_t x[CST328_LCD_TOUCH_MAX_POINTS];
+  uint16_t y[CST328_LCD_TOUCH_MAX_POINTS];
+  uint16_t strength[CST328_LCD_TOUCH_MAX_POINTS];
+  uint8_t point_num = 0;
+  
+  bool down = (Touch_Get_XY(x, y, strength, &point_num, CST328_LCD_TOUCH_MAX_POINTS) && point_num > 0);
+  uint32_t now = millis();
+  
+  if (down) {
+    if (!tracking) { 
+      // Start of a new touch
+      tracking = true; 
+      startX = latestX = x[0]; 
+      startedMs = now; 
+    } else {
+      // Continuing touch
+      latestX = x[0];
+    }
+    lastDownMs = now; // update last seen touch time
+  } else if (tracking) {
+    // We are tracking, but no touch right now. Debounce the release!
+    if (now - lastDownMs > 50) {
+      // 50ms without touch -> confirmed release
+      tracking = false; 
+      
+      if (now - lastGestureMs < 250) return; // Cooldown between actions
+      
+      int16_t dx = (int16_t)latestX - (int16_t)startX;
+      uint32_t duration = lastDownMs - startedMs;
+      
+      if (duration >= 1200) {
+        // Long press -> OTA toggle
+        otaToggleRequested = true; 
+        lastGestureMs = now;
+      } else if (abs(dx) >= 35) { 
+        // Horizontal swipe -> change page
+        page = dx < 0 ? (page + 1) % 4 : (page + 3) % 4; 
+        frameDirty = true; 
+        lastGestureMs = now;
+        Serial.printf("touch swipe: dx=%d, page=%u\n", dx, page + 1); 
+      } else if (duration < 500 && abs(dx) < 20) {
+        // Short tap without much movement -> change page based on screen half
+        if (startX < (SCREEN_W / 2)) {
+          // Tap left half -> previous page
+          page = (page + 3) % 4;
+        } else {
+          // Tap right half -> next page
+          page = (page + 1) % 4;
+        }
+        frameDirty = true;
+        lastGestureMs = now;
+        Serial.printf("touch tap: x=%d, page=%u\n", startX, page + 1);
+      }
+    }
+  }
+}
+
+static void logicTask(void *) {
+  uint32_t lastConnectMs = 0, lastPollMs = 0;
+  for (;;) {
+    uint32_t now = millis();
+    if (otaToggleRequested) { otaToggleRequested = false; otaActive ? stopOtaPortal() : startOtaPortal(); }
+    if (otaActive) otaServer.handleClient();
+    if ((!client || !client->isConnected()) && now - lastConnectMs >= 6000) { lastConnectMs = now; findAndConnectBattery(); }
+    if (batteryConnected && now - lastPollMs >= 250) { lastPollMs = now; pollBattery(); }
+    vTaskDelay(pdMS_TO_TICKS(20));
+  }
+}
+static void uiTask(void *) {
+  for (;;) {
+    serviceTouch();
+    if (frameDirty) { frameDirty = false; dataDirty = false; drawFullPage(snapshotTelemetry()); }
+    else if (dataDirty) { dataDirty = false; drawChangedValues(snapshotTelemetry()); }
+    vTaskDelay(pdMS_TO_TICKS(15));
+  }
+}
+
+void setup() {
+  Serial.begin(115200); delay(250); Serial.println("PAC-BATTERY boot; BMS access is read-only");
+
+  // Latch the Waveshare board's battery supply immediately. This is GPIO 7
+  // (PWR_Control_PIN) in the vendor PWR_Key example; it only controls this
+  // dashboard's own power hold circuit, never the connected battery BMS.
+  pinMode(PWR_KEY_INPUT, INPUT);
+  pinMode(PWR_CONTROL, OUTPUT);
+  digitalWrite(PWR_CONTROL, HIGH);
+
+  telemetryMutex = xSemaphoreCreateMutex(); uiMutex = xSemaphoreCreateMutex();
+  pinMode(LCD_BL, OUTPUT); analogWrite(LCD_BL, 128); // 50% brightness to stop overheating!
+  SPI.begin(LCD_SCK, -1, LCD_MOSI, LCD_CS); 
+  lcd.init(240, 320); 
+  lcd.setRotation(0); 
+  lcd.setTextWrap(false); 
+  Touch_Init();
+  NimBLEDevice::init("LFPGo400 Dashboard"); NimBLEDevice::setPower(ESP_PWR_LVL_P9); Serial.println("display and BLE initialized");
+  xTaskCreatePinnedToCore(logicTask, "bms_logic", 8192, nullptr, 1, nullptr, 0);
+  xTaskCreatePinnedToCore(uiTask, "display_ui", 8192, nullptr, 1, nullptr, 1);
+}
+void loop() { vTaskDelay(portMAX_DELAY); }

@@ -10,6 +10,7 @@
 #define TFT_CS    5
 #define TFT_RST   4
 #define TFT_DC    2
+#define TFT_BLK   3 // Backlight PWM pin
 // SCL -> GPIO18, SDA -> GPIO23 (Hardware VSPI)
 Adafruit_ST7735 tft = Adafruit_ST7735(TFT_CS, TFT_DC, TFT_RST);
 
@@ -195,6 +196,10 @@ class MyScanCallbacks: public NimBLEScanCallbacks {
 void setup() {
     Serial.begin(115200);
     
+    // Setup TFT Backlight PWM to reduce brightness & heat
+    pinMode(TFT_BLK, OUTPUT);
+    analogWrite(TFT_BLK, 128); // 50% brightness (0-255)
+
     tft.initR(INITR_144GREENTAB);
     tft.setRotation(0);
     tft.fillScreen(BG_BLACK);
@@ -285,36 +290,41 @@ void drawAll() {
 }
 
 void drawTitleBar() {
-    tft.fillRect(0, 6, SCREEN_W, 10, BG_BLACK);
-    tft.setTextColor(PAC_YELLOW);
-    tft.setTextSize(1);
-    tft.setCursor(24, 7);
-    tft.print("PAC-BATTERY");
+    static bool first = true;
+    if (first) {
+        tft.fillRect(0, 6, SCREEN_W, 10, BG_BLACK);
+        tft.setTextColor(PAC_YELLOW);
+        tft.setTextSize(1);
+        tft.setCursor(24, 7);
+        tft.print("PAC-BATTERY");
+        first = false;
+    } else {
+        // Just clear the Pacman area to prevent full-bar flickering
+        tft.fillRect(0, 6, 20, 10, BG_BLACK);
+    }
     drawPacmanIcon(8, 11, 4, mouthOpen);
 }
 
 void drawSocNumber() {
-    tft.fillRect(0, 18, SCREEN_W, 32, BG_BLACK);
-    
     uint16_t color = PAC_YELLOW;
     if (soc <= 15) color = GHOST_RED;
-    else if (soc <= 35) color = GHOST_RED; // Requested red instead of orange
+    else if (soc <= 35) color = GHOST_RED; 
     else if (isCharging) color = BOLT_GREEN;
 
-    tft.setTextColor(color);
-    tft.setTextSize(4); // BIG SIZE: ~24x32 per character
+    tft.setTextColor(color, BG_BLACK);
+    tft.setTextSize(4);
 
-    char buf[6];
-    sprintf(buf, "%d%%", soc);
-    int textW = strlen(buf) * 24;
-    int x = (SCREEN_W - textW) / 2;
+    char buf[10];
+    sprintf(buf, "%d%%  ", soc); // pad with spaces to overwrite old digits
+    int textW = 24 * 4; // Max width approx for "100%"
+    int x = (SCREEN_W - textW) / 2 + 12;
     tft.setCursor(x, 20);
     tft.print(buf);
 }
 
 void drawPelletBar() {
-    // Clear extra height to ensure the "SCANNING..." text is fully wiped
-    tft.fillRect(0, PELLET_ROW_Y - 6, SCREEN_W, 22, BG_BLACK);
+    // Only clear the pellet area, not the whole screen
+    tft.fillRect(0, PELLET_ROW_Y - 6, SCREEN_W, 14, BG_BLACK);
 
     int filledPellets = (soc * PELLET_COUNT) / 100;
     int eatenPellets = PELLET_COUNT - filledPellets;
@@ -330,49 +340,45 @@ void drawPelletBar() {
     drawPacmanIcon(pacX, PELLET_ROW_Y, 6, mouthOpen);
 
     if (eatenPellets > 1) {
-        uint16_t ghostColor = isCharging ? GHOST_CYAN : GHOST_RED; // RED instead of orange
+        uint16_t ghostColor = isCharging ? GHOST_CYAN : GHOST_RED;
         drawGhostIcon(PELLET_START_X - 6, PELLET_ROW_Y, 5, ghostColor);
     }
 }
 
 void drawStateBadge() {
-    tft.fillRect(0, 72, SCREEN_W, 16, BG_BLACK);
-    tft.setTextSize(2); // BIGGER STATE BADGE
+    // We must clear just the icon area, text will self-clear
+    tft.fillRect(0, 72, 20, 16, BG_BLACK);
+    tft.setTextSize(2); 
     
     if (isCharging) {
-        tft.setTextColor(BOLT_GREEN);
+        tft.setTextColor(BOLT_GREEN, BG_BLACK);
         tft.setCursor(20, 72);
-        tft.print("CHARGING");
+        tft.print("CHARGING  ");
         drawBolt(6, 73, BOLT_GREEN);
     } else if (isDischarging) {
-        tft.setTextColor(GHOST_RED); // Red instead of orange
-        // "DISCHARGING" is 11 chars * 12px = 132px. Won't fit at size 2 (max 128)!
-        // We use "DRAINING" or "IN USE" to fit in size 2, or just "DRAINING"
+        tft.setTextColor(GHOST_RED, BG_BLACK); 
         tft.setCursor(20, 72);
-        tft.print("DRAINING");
+        tft.print("DRAINING  ");
         drawGhostIcon(8, 79, 6, GHOST_RED);
     } else {
-        tft.setTextColor(TEXT_WHITE);
-        tft.setCursor(40, 72);
-        tft.print("IDLE");
+        tft.setTextColor(TEXT_WHITE, BG_BLACK);
+        tft.setCursor(20, 72);
+        tft.print("IDLE      ");
     }
 }
 
 void drawVoltageCurrent() {
-    tft.fillRect(0, 106, SCREEN_W, 16, BG_BLACK);
+    char vbuf[10], cbuf[10];
+    sprintf(vbuf, "%4.1fV ", packVoltage);
+    sprintf(cbuf, "%c%4.1fA ", isCharging ? '+' : '-', fabs(packCurrent));
 
-    char vbuf[8], cbuf[8];
-    dtostrf(packVoltage, 4, 1, vbuf);
-    dtostrf(fabs(packCurrent), 4, 1, cbuf);
-
-    tft.setTextColor(TEXT_WHITE);
-    tft.setTextSize(2); // BIGGER VOLT/CURR
+    tft.setTextColor(TEXT_WHITE, BG_BLACK);
+    tft.setTextSize(2); 
     tft.setCursor(2, 106);
     tft.print(vbuf);
     
-    tft.setTextColor(isCharging ? BOLT_GREEN : GHOST_RED); // Red instead of orange
+    tft.setTextColor(isCharging ? BOLT_GREEN : GHOST_RED, BG_BLACK); 
     tft.setCursor(68, 106);
-    tft.print(isCharging ? "+" : "-");
     tft.print(cbuf);
 }
 
