@@ -165,6 +165,7 @@ static void create_page_dots(lv_obj_t *parent, uint8_t active_idx) {
     lv_obj_set_style_bg_opa(dot, LV_OPA_COVER, 0);
     lv_obj_set_style_shadow_width(dot, 0, 0);
     lv_obj_set_style_pad_all(dot, 0, 0);
+    lv_obj_set_ext_click_area(dot, 15); // Expand touch target by 15px on all sides
     lv_obj_add_event_cb(dot, nav_tap_event_cb, LV_EVENT_CLICKED, (void*)(uintptr_t)i);
   }
 }
@@ -600,9 +601,11 @@ static void updateUI(const Telemetry &d) {
   static bool prev_connected = false;
   static uint32_t last_anim_ms = 0;
   uint32_t now = millis();
+  
+  bool dataValid = batteryConnected && (d.timestampMs > 0);
 
   // Handle Splash Screen Transition to Main Screen on first successful data reception
-  if (d.timestampMs > 0 && batteryConnected) {
+  if (dataValid) {
     if (lv_scr_act() == splash_scr) {
       lv_scr_load_anim(main_scr, LV_SCR_LOAD_ANIM_FADE_ON, 300, 0, false);
     }
@@ -621,19 +624,20 @@ static void updateUI(const Telemetry &d) {
 
     // Temperature (Top Bar)
     if (s1_temp_label) {
-      if (d.timestampMs > 0) {
+      if (dataValid) {
         lv_label_set_text_fmt(s1_temp_label, "%d\xc2\xb0\x43", d.temperatureC);
         if (d.temperatureC > 45) lv_obj_set_style_text_color(s1_temp_label, COLOR_ACCENT_RED, 0);
         else if (d.temperatureC > 35) lv_obj_set_style_text_color(s1_temp_label, COLOR_ACCENT_ORANGE, 0);
         else lv_obj_set_style_text_color(s1_temp_label, COLOR_TEXT_SECONDARY, 0);
       } else {
         lv_label_set_text(s1_temp_label, "--\xc2\xb0\x43");
+        lv_obj_set_style_text_color(s1_temp_label, COLOR_TEXT_SECONDARY, 0);
       }
     }
 
     // SOC Gauge & Arc
     if (s1_soc_val_label && s1_soc_arc) {
-      if (d.timestampMs > 0) {
+      if (dataValid) {
         lv_label_set_text_fmt(s1_soc_val_label, "%u%%", d.soc);
         lv_arc_set_value(s1_soc_arc, d.soc);
         if (d.soc >= 50) {
@@ -646,12 +650,13 @@ static void updateUI(const Telemetry &d) {
       } else {
         lv_label_set_text(s1_soc_val_label, "--%");
         lv_arc_set_value(s1_soc_arc, 0);
+        lv_obj_set_style_arc_color(s1_soc_arc, COLOR_DIVIDER, LV_PART_INDICATOR);
       }
     }
 
     // Status Pill
     if (s1_status_pill && s1_status_label) {
-      if (!batteryConnected || d.timestampMs == 0) {
+      if (!dataValid) {
         lv_obj_set_style_bg_color(s1_status_pill, lv_color_hex(0x2A1015), 0);
         lv_obj_set_style_text_color(s1_status_label, COLOR_ACCENT_RED, 0);
         lv_label_set_text(s1_status_label, "X DISCONNECTED");
@@ -672,123 +677,165 @@ static void updateUI(const Telemetry &d) {
 
     // Voltage & Current
     if (s1_volt_val_label) {
-      if (d.timestampMs > 0) lv_label_set_text_fmt(s1_volt_val_label, "%.1f V", d.voltage);
+      if (dataValid) lv_label_set_text_fmt(s1_volt_val_label, "%.1f V", d.voltage);
       else lv_label_set_text(s1_volt_val_label, "--.- V");
     }
 
     if (s1_curr_val_label) {
-      if (d.timestampMs > 0) {
+      if (dataValid) {
         lv_label_set_text_fmt(s1_curr_val_label, "%+.1f A", d.current);
         if (d.current > 0.05f) lv_obj_set_style_text_color(s1_curr_val_label, COLOR_ACCENT_GREEN, 0);
         else if (d.current < -0.05f) lv_obj_set_style_text_color(s1_curr_val_label, COLOR_ACCENT_ORANGE, 0);
         else lv_obj_set_style_text_color(s1_curr_val_label, COLOR_ACCENT_CYAN, 0);
       } else {
         lv_label_set_text(s1_curr_val_label, "--.- A");
+        lv_obj_set_style_text_color(s1_curr_val_label, COLOR_TEXT_SECONDARY, 0);
       }
     }
   }
 
   // --- SCREEN 2: CELL DIAGNOSTICS ---
-  if (cells_scr && d.cellCount > 0) {
-    uint16_t min_v = 65535, max_v = 0;
-    uint8_t min_idx = 0, max_idx = 0;
+  if (cells_scr) {
+    if (dataValid && d.cellCount > 0) {
+      uint16_t min_v = 65535, max_v = 0;
+      uint8_t min_idx = 0, max_idx = 0;
 
-    for (uint8_t i = 0; i < d.cellCount && i < 16; i++) {
-      uint16_t v = d.cellVoltages[i];
-      if (v > 0) {
-        if (v < min_v) { min_v = v; min_idx = i + 1; }
-        if (v > max_v) { max_v = v; max_idx = i + 1; }
-      }
-    }
-    uint16_t delta_v = (max_v >= min_v) ? (max_v - min_v) : 0;
-
-    // Title Delta
-    if (s2_delta_label) {
-      lv_label_set_text_fmt(s2_delta_label, "\xce\x94 %u mV", delta_v);
-      if (delta_v > 50) lv_obj_set_style_text_color(s2_delta_label, COLOR_CELL_CRITICAL, 0);
-      else if (delta_v > 20) lv_obj_set_style_text_color(s2_delta_label, COLOR_CELL_WARN, 0);
-      else lv_obj_set_style_text_color(s2_delta_label, COLOR_CELL_OK, 0);
-    }
-
-    // Cell Cards
-    for (uint8_t i = 0; i < 16; i++) {
-      if (i < d.cellCount) {
-        lv_obj_clear_flag(s2_cell_cards[i], LV_OBJ_FLAG_HIDDEN);
+      for (uint8_t i = 0; i < d.cellCount && i < 16; i++) {
         uint16_t v = d.cellVoltages[i];
-        lv_label_set_text_fmt(s2_cell_volt_labels[i], "%u", v);
-        lv_bar_set_value(s2_cell_bars[i], v, LV_ANIM_ON);
-
-        // Dynamic Card / Bar Color
-        if (v < 2900 || v > 3650) {
-          lv_obj_set_style_bg_color(s2_cell_bars[i], COLOR_CELL_CRITICAL, LV_PART_INDICATOR);
-          lv_obj_set_style_text_color(s2_cell_volt_labels[i], COLOR_CELL_CRITICAL, 0);
-        } else if (i + 1 == min_idx) {
-          lv_obj_set_style_bg_color(s2_cell_bars[i], COLOR_CELL_WARN, LV_PART_INDICATOR);
-          lv_obj_set_style_text_color(s2_cell_volt_labels[i], COLOR_CELL_WARN, 0);
-        } else if (i + 1 == max_idx) {
-          lv_obj_set_style_bg_color(s2_cell_bars[i], COLOR_ACCENT_CYAN, LV_PART_INDICATOR);
-          lv_obj_set_style_text_color(s2_cell_volt_labels[i], COLOR_ACCENT_CYAN, 0);
-        } else {
-          lv_obj_set_style_bg_color(s2_cell_bars[i], COLOR_CELL_OK, LV_PART_INDICATOR);
-          lv_obj_set_style_text_color(s2_cell_volt_labels[i], COLOR_TEXT_PRIMARY, 0);
+        if (v > 0) {
+          if (v < min_v) { min_v = v; min_idx = i + 1; }
+          if (v > max_v) { max_v = v; max_idx = i + 1; }
         }
-      } else {
-        lv_obj_add_flag(s2_cell_cards[i], LV_OBJ_FLAG_HIDDEN);
       }
-    }
+      uint16_t delta_v = (max_v >= min_v) ? (max_v - min_v) : 0;
 
-    // Summary Card
-    if (s2_min_label) lv_label_set_text_fmt(s2_min_label, "MIN: %u mV (C%u)", min_v, min_idx);
-    if (s2_max_label) lv_label_set_text_fmt(s2_max_label, "MAX: %u mV (C%u)", max_v, max_idx);
-    if (s2_delta_summary_label) {
-      lv_label_set_text_fmt(s2_delta_summary_label, "DELTA: %u mV", delta_v);
-      if (delta_v > 50) lv_obj_set_style_text_color(s2_delta_summary_label, COLOR_CELL_CRITICAL, 0);
-      else if (delta_v > 20) lv_obj_set_style_text_color(s2_delta_summary_label, COLOR_CELL_WARN, 0);
-      else lv_obj_set_style_text_color(s2_delta_summary_label, COLOR_CELL_OK, 0);
+      if (s2_delta_label) {
+        lv_label_set_text_fmt(s2_delta_label, "\xce\x94 %u mV", delta_v);
+        if (delta_v > 50) lv_obj_set_style_text_color(s2_delta_label, COLOR_CELL_CRITICAL, 0);
+        else if (delta_v > 20) lv_obj_set_style_text_color(s2_delta_label, COLOR_CELL_WARN, 0);
+        else lv_obj_set_style_text_color(s2_delta_label, COLOR_CELL_OK, 0);
+      }
+
+      for (uint8_t i = 0; i < 16; i++) {
+        if (i < d.cellCount) {
+          lv_obj_clear_flag(s2_cell_cards[i], LV_OBJ_FLAG_HIDDEN);
+          uint16_t v = d.cellVoltages[i];
+          lv_label_set_text_fmt(s2_cell_volt_labels[i], "%u", v);
+          lv_bar_set_value(s2_cell_bars[i], v, LV_ANIM_ON);
+
+          if (v < 2900 || v > 3650) {
+            lv_obj_set_style_bg_color(s2_cell_bars[i], COLOR_CELL_CRITICAL, LV_PART_INDICATOR);
+            lv_obj_set_style_text_color(s2_cell_volt_labels[i], COLOR_CELL_CRITICAL, 0);
+          } else if (i + 1 == min_idx) {
+            lv_obj_set_style_bg_color(s2_cell_bars[i], COLOR_CELL_WARN, LV_PART_INDICATOR);
+            lv_obj_set_style_text_color(s2_cell_volt_labels[i], COLOR_CELL_WARN, 0);
+          } else if (i + 1 == max_idx) {
+            lv_obj_set_style_bg_color(s2_cell_bars[i], COLOR_ACCENT_CYAN, LV_PART_INDICATOR);
+            lv_obj_set_style_text_color(s2_cell_volt_labels[i], COLOR_ACCENT_CYAN, 0);
+          } else {
+            lv_obj_set_style_bg_color(s2_cell_bars[i], COLOR_CELL_OK, LV_PART_INDICATOR);
+            lv_obj_set_style_text_color(s2_cell_volt_labels[i], COLOR_TEXT_PRIMARY, 0);
+          }
+        } else {
+          lv_obj_add_flag(s2_cell_cards[i], LV_OBJ_FLAG_HIDDEN);
+        }
+      }
+
+      if (s2_min_label) lv_label_set_text_fmt(s2_min_label, "MIN: %u mV (C%u)", min_v, min_idx);
+      if (s2_max_label) lv_label_set_text_fmt(s2_max_label, "MAX: %u mV (C%u)", max_v, max_idx);
+      if (s2_delta_summary_label) {
+        lv_label_set_text_fmt(s2_delta_summary_label, "DELTA: %u mV", delta_v);
+        if (delta_v > 50) lv_obj_set_style_text_color(s2_delta_summary_label, COLOR_CELL_CRITICAL, 0);
+        else if (delta_v > 20) lv_obj_set_style_text_color(s2_delta_summary_label, COLOR_CELL_WARN, 0);
+        else lv_obj_set_style_text_color(s2_delta_summary_label, COLOR_CELL_OK, 0);
+      }
+    } else {
+      // Disconnected handling for cells
+      if (s2_delta_label) {
+        lv_label_set_text(s2_delta_label, "\xce\x94 -- mV");
+        lv_obj_set_style_text_color(s2_delta_label, COLOR_TEXT_SECONDARY, 0);
+      }
+      for (uint8_t i = 0; i < 16; i++) {
+        lv_label_set_text(s2_cell_volt_labels[i], "----");
+        lv_bar_set_value(s2_cell_bars[i], 2800, LV_ANIM_OFF);
+        lv_obj_set_style_bg_color(s2_cell_bars[i], COLOR_DIVIDER, LV_PART_INDICATOR);
+        lv_obj_set_style_text_color(s2_cell_volt_labels[i], COLOR_TEXT_SECONDARY, 0);
+      }
+      if (s2_min_label) lv_label_set_text(s2_min_label, "MIN: ---- mV (--)");
+      if (s2_max_label) lv_label_set_text(s2_max_label, "MAX: ---- mV (--)");
+      if (s2_delta_summary_label) {
+        lv_label_set_text(s2_delta_summary_label, "DELTA: -- mV");
+        lv_obj_set_style_text_color(s2_delta_summary_label, COLOR_TEXT_SECONDARY, 0);
+      }
     }
   }
 
   // --- SCREEN 3: SYSTEM HEALTH ---
-  if (health_scr && d.timestampMs > 0) {
-    if (s3_cap_val_label) lv_label_set_text_fmt(s3_cap_val_label, "%.1f / %.1f Ah", d.remainingAh, d.designAh);
-    if (s3_cap_bar && d.designAh > 0) {
-      uint8_t cap_pct = (uint8_t)((d.remainingAh / d.designAh) * 100.0f);
-      lv_bar_set_value(s3_cap_bar, cap_pct, LV_ANIM_ON);
-      if (cap_pct >= 50) lv_obj_set_style_bg_color(s3_cap_bar, COLOR_ACCENT_GREEN, LV_PART_INDICATOR);
-      else if (cap_pct >= 20) lv_obj_set_style_bg_color(s3_cap_bar, COLOR_ACCENT_GOLD, LV_PART_INDICATOR);
-      else lv_obj_set_style_bg_color(s3_cap_bar, COLOR_ACCENT_RED, LV_PART_INDICATOR);
-    }
+  if (health_scr) {
+    if (dataValid) {
+      if (s3_cap_val_label) lv_label_set_text_fmt(s3_cap_val_label, "%.1f / %.1f Ah", d.remainingAh, d.designAh);
+      if (s3_cap_bar && d.designAh > 0) {
+        uint8_t cap_pct = (uint8_t)((d.remainingAh / d.designAh) * 100.0f);
+        lv_bar_set_value(s3_cap_bar, cap_pct, LV_ANIM_ON);
+        if (cap_pct >= 50) lv_obj_set_style_bg_color(s3_cap_bar, COLOR_ACCENT_GREEN, LV_PART_INDICATOR);
+        else if (cap_pct >= 20) lv_obj_set_style_bg_color(s3_cap_bar, COLOR_ACCENT_GOLD, LV_PART_INDICATOR);
+        else lv_obj_set_style_bg_color(s3_cap_bar, COLOR_ACCENT_RED, LV_PART_INDICATOR);
+      }
 
-    if (s3_cycles_val_label) lv_label_set_text_fmt(s3_cycles_val_label, "%u", d.cycles);
-    if (s3_temp_val_label) {
-      lv_label_set_text_fmt(s3_temp_val_label, "%d \xc2\xb0\x43", d.temperatureC);
-      if (d.temperatureC > 45) lv_obj_set_style_text_color(s3_temp_val_label, COLOR_ACCENT_RED, 0);
-      else if (d.temperatureC > 35) lv_obj_set_style_text_color(s3_temp_val_label, COLOR_ACCENT_ORANGE, 0);
-      else lv_obj_set_style_text_color(s3_temp_val_label, COLOR_ACCENT_GREEN, 0);
-    }
+      if (s3_cycles_val_label) lv_label_set_text_fmt(s3_cycles_val_label, "%u", d.cycles);
+      if (s3_temp_val_label) {
+        lv_label_set_text_fmt(s3_temp_val_label, "%d \xc2\xb0\x43", d.temperatureC);
+        if (d.temperatureC > 45) lv_obj_set_style_text_color(s3_temp_val_label, COLOR_ACCENT_RED, 0);
+        else if (d.temperatureC > 35) lv_obj_set_style_text_color(s3_temp_val_label, COLOR_ACCENT_ORANGE, 0);
+        else lv_obj_set_style_text_color(s3_temp_val_label, COLOR_ACCENT_GREEN, 0);
+      }
 
-    // Protection Alarm Grid (Bits 0..4)
-    for (int i = 0; i < 5; i++) {
-      bool tripped = (d.protection & (1 << i));
-      if (tripped) {
-        lv_label_set_text(s3_alarm_status_labels[i], "TRIP");
-        lv_obj_set_style_text_color(s3_alarm_status_labels[i], COLOR_ACCENT_RED, 0);
-        lv_obj_set_style_bg_color(s3_alarm_cards[i], lv_color_hex(0x351015), 0);
-      } else {
-        lv_label_set_text(s3_alarm_status_labels[i], "OK");
-        lv_obj_set_style_text_color(s3_alarm_status_labels[i], COLOR_ACCENT_GREEN, 0);
+      for (int i = 0; i < 5; i++) {
+        bool tripped = (d.protection & (1 << i));
+        if (tripped) {
+          lv_label_set_text(s3_alarm_status_labels[i], "TRIP");
+          lv_obj_set_style_text_color(s3_alarm_status_labels[i], COLOR_ACCENT_RED, 0);
+          lv_obj_set_style_bg_color(s3_alarm_cards[i], lv_color_hex(0x351015), 0);
+        } else {
+          lv_label_set_text(s3_alarm_status_labels[i], "OK");
+          lv_obj_set_style_text_color(s3_alarm_status_labels[i], COLOR_ACCENT_GREEN, 0);
+          lv_obj_set_style_bg_color(s3_alarm_cards[i], COLOR_BG_CARD, 0);
+        }
+      }
+
+      if (s3_fet_chg_label) {
+        lv_label_set_text(s3_fet_chg_label, d.chargeFet ? "CHG: ON" : "CHG: OFF");
+        lv_obj_set_style_text_color(s3_fet_chg_label, d.chargeFet ? COLOR_ACCENT_GREEN : COLOR_ACCENT_RED, 0);
+      }
+      if (s3_fet_dchg_label) {
+        lv_label_set_text(s3_fet_dchg_label, d.dischargeFet ? "DCHG: ON" : "DCHG: OFF");
+        lv_obj_set_style_text_color(s3_fet_dchg_label, d.dischargeFet ? COLOR_ACCENT_GREEN : COLOR_ACCENT_RED, 0);
+      }
+    } else {
+      // Disconnected handling for health
+      if (s3_cap_val_label) lv_label_set_text(s3_cap_val_label, "--.- / --.- Ah");
+      if (s3_cap_bar) {
+        lv_bar_set_value(s3_cap_bar, 0, LV_ANIM_OFF);
+        lv_obj_set_style_bg_color(s3_cap_bar, COLOR_DIVIDER, LV_PART_INDICATOR);
+      }
+      if (s3_cycles_val_label) lv_label_set_text(s3_cycles_val_label, "---");
+      if (s3_temp_val_label) {
+        lv_label_set_text(s3_temp_val_label, "-- \xc2\xb0\x43");
+        lv_obj_set_style_text_color(s3_temp_val_label, COLOR_TEXT_SECONDARY, 0);
+      }
+      for (int i = 0; i < 5; i++) {
+        lv_label_set_text(s3_alarm_status_labels[i], "--");
+        lv_obj_set_style_text_color(s3_alarm_status_labels[i], COLOR_TEXT_SECONDARY, 0);
         lv_obj_set_style_bg_color(s3_alarm_cards[i], COLOR_BG_CARD, 0);
       }
-    }
-
-    // FET Status
-    if (s3_fet_chg_label) {
-      lv_label_set_text(s3_fet_chg_label, d.chargeFet ? "CHG: ON" : "CHG: OFF");
-      lv_obj_set_style_text_color(s3_fet_chg_label, d.chargeFet ? COLOR_ACCENT_GREEN : COLOR_ACCENT_RED, 0);
-    }
-    if (s3_fet_dchg_label) {
-      lv_label_set_text(s3_fet_dchg_label, d.dischargeFet ? "DCHG: ON" : "DCHG: OFF");
-      lv_obj_set_style_text_color(s3_fet_dchg_label, d.dischargeFet ? COLOR_ACCENT_GREEN : COLOR_ACCENT_RED, 0);
+      if (s3_fet_chg_label) {
+        lv_label_set_text(s3_fet_chg_label, "CHG: --");
+        lv_obj_set_style_text_color(s3_fet_chg_label, COLOR_TEXT_SECONDARY, 0);
+      }
+      if (s3_fet_dchg_label) {
+        lv_label_set_text(s3_fet_dchg_label, "DCHG: --");
+        lv_obj_set_style_text_color(s3_fet_dchg_label, COLOR_TEXT_SECONDARY, 0);
+      }
     }
   }
 }
