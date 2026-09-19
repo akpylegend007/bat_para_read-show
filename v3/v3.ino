@@ -1014,7 +1014,7 @@ static void logicTask(void *) {
       doScan = false;
     }
 
-    if (batteryConnected && now - lastPollMs >= 250) { 
+    if (batteryConnected && now - lastPollMs >= 500) { 
       lastPollMs = now; 
       pollBattery(); 
     }
@@ -1062,11 +1062,11 @@ void setup() {
   lv_scr_load(splash_scr);
 
   // Initialize NimBLE Stack
-  NimBLEDevice::init("LFPGo400 Dashboard");
+  NimBLEDevice::init("");
   NimBLEDevice::setPower(ESP_PWR_LVL_P9);
   
   // Launch Concurrency Pipelines
-  xTaskCreatePinnedToCore(logicTask, "bms_logic", 8192, nullptr, 1, nullptr, 0);
+  xTaskCreatePinnedToCore(logicTask, "bms_logic", 8192, nullptr, 1, nullptr, 1);
   xTaskCreatePinnedToCore(uiTask, "display_ui", 16384, nullptr, 1, nullptr, 1);
 }
 
